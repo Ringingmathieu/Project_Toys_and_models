@@ -1,1 +1,181 @@
+# Sales: The number of products sold by category and by month, with comparison and rate of change compared to the same month of the previous year
 
+SELECT productlines.productLine, SUM(orderdetails.quantityOrdered) AS product_sold,
+YEAR(orders.orderDate) AS YEAR, MONTH(orders.orderDate) AS MONTH,
+(SUM(orderdetails.quantityOrdered) - LAG(SUM(orderdetails.quantityOrdered)) OVER (partition by productLine ORDER BY month (orders.orderDate) ASC,
+year(orders.orderDate) ASC)) AS revenue_growth,
+(sum(orderdetails.quantityOrdered) - LAG(sum(orderdetails.quantityOrdered)) OVER (partition by productLine ORDER BY month (orders.orderDate) ASC,
+year(orders.orderDate) ASC)) / (LAG(sum(orderdetails.quantityOrdered)) OVER (partition by productLine ORDER BY month (orders.orderDate) ASC,
+year(orders.orderDate) ASC)) as change_rate_percent
+from products
+join productlines on products.productLine = productlines.productLine
+join orderdetails on products.productCode = orderdetails.productCode
+join orders on orderdetails.orderNumber = orders.orderNumber
+WHERE YEAR(orders.orderDate) IS NOT NULL AND orders.status = 'Shipped' or orders.status = 'Resolved'
+group by MONTH, YEAR, productLine;
+
+
+# Sales: Calculate margin for every product 
+
+select
+products.productLine,
+products.productName,
+products.buyPrice as price_unit, 
+sum(products.buyPrice * orderdetails.quantityOrdered) as purchase,
+sum(orderdetails.quantityOrdered * orderdetails.priceEach) as total, 
+(sum(orderdetails.quantityOrdered * orderdetails.priceEach) - sum(products.buyPrice * orderdetails.quantityOrdered)) as marge,
+orders.orderDate,
+orders.status
+from orderdetails
+join products using (productCode)
+join orders using (orderNumber)
+where orders.status = 'Shipped' or orders.status = 'Resolved'
+group by products.productName
+order by products.productLine;
+
+
+# Sales: forecast turnover 2023 per product line compared to 2022
+
+CREATE VIEW prevision AS (
+SELECT productlines.productLine, YEAR(orders.orderDate) AS YEAR,
+SUM(orderdetails.quantityOrdered*orderdetails.priceEach) AS CA,
+(SUM(orderdetails.quantityOrdered*orderdetails.priceEach) - LAG(SUM(orderdetails.quantityOrdered*orderdetails.priceEach))
+OVER (partition by productLine ORDER BY YEAR (orders.orderDate) ASC)) AS revenue_growth,
+(sum(orderdetails.quantityOrdered*orderdetails.priceEach) - LAG(sum(orderdetails.quantityOrdered*orderdetails.priceEach))
+OVER (partition by productLine ORDER BY YEAR (orders.orderDate) ASC)) / (LAG(sum(orderdetails.quantityOrdered*orderdetails.priceEach))
+OVER (partition by productLine ORDER BY YEAR (orders.orderDate) ASC)) as change_rate_percent
+from products
+join productlines on products.productLine = productlines.productLine
+join orderdetails on products.productCode = orderdetails.productCode
+join orders on orderdetails.orderNumber = orders.orderNumber
+WHERE YEAR(orders.orderDate) IS NOT NULL AND YEAR(orders.orderDate) < 2023
+group by productLine, year
+ORDER BY productLine, YEAR);
+
+SELECT *, (prevision.CA+(prevision.CA *prevision.change_rate_percent)) AS CA_2023
+FROM prevision
+WHERE prevision.YEAR = 2022;
+
+
+# Sales: forecast turnover 2023 with every month from 2021 to 2023
+
+SELECT productlines.productLine, products.productCode, sum(orderdetails.quantityOrdered*orderdetails.priceEach) AS CA,
+YEAR(orders.orderDate) AS YEAR, MONTH(orders.orderDate) AS MONTH
+from products
+join productlines on products.productLine = productlines.productLine
+join orderdetails on products.productCode = orderdetails.productCode
+join orders on orderdetails.orderNumber = orders.orderNumber
+WHERE YEAR(orders.orderDate) IS NOT NULL AND orders.status = 'Shipped' or orders.status = 'Resolved'
+group by MONTH, YEAR, products.productLine, products.productCode
+order by products.productLine;
+
+
+# Finances: find the total amount of the orders that has not been paid yet
+
+create view global_order as(
+select orders.customerNumber, customers.customerName,
+ sum(orderdetails.quantityOrdered * orderdetails.priceEach) as total_order
+from orders
+join orderdetails using(orderNumber)
+join customers using(customerNumber)
+where orders.status = 'Shipped' or orders.status = 'Resolved'
+group by customers.customerName
+order by total_order desc
+);
+
+select
+*
+from( select
+global_order.customerNumber,
+global_order.customerName,
+global_order.total_order as total_cde,
+sum(payments.amount) as total_payment,
+(global_order.total_order - sum(payments.amount)) as diff
+from global_order
+join payments using(customerNumber)
+group by global_order.customerName
+order by diff desc) as diff_subq
+where diff_subq.diff <> 0;
+
+
+# Finances: breakdown turnover 2023 per office
+
+create view request as (
+select offices.country, employees.employeeNumber, customers.salesRepEmployeeNumber, customers.customerNumber
+from offices
+left join employees using (officeCode)
+join customers on employees.employeeNumber = customers.salesRepEmployeeNumber);
+
+SELECT
+countroff, CA_order, YEAR, MONTH
+FROM (select request.country as countroff,
+	sum(orderdetails.quantityOrdered * orderdetails.priceEach) as CA_order,
+	year(orders.orderDate) as YEAR, month(orders.orderDate) as MONTH,
+    orders.status as status
+	from request
+	join orders using (customerNumber)
+	join orderdetails using (orderNumber)
+	where orders.orderDate >= DATE_ADD(DATE_ADD(CURRENT_DATE, INTERVAL 1 - DAY(CURRENT_DATE) DAY), INTERVAL -2 MONTH)
+	group by countroff, Month, year
+	order by Month, CA_order desc) as subQ_office
+where subQ_office.status = 'Shipped' or subQ_office.status = 'Resolved';
+
+
+# Finances: breakdown of turnover per country
+
+select
+country, CA, YEAR, MONTH
+from(select customers.country as country,
+	sum(orderdetails.quantityOrdered * orderdetails.priceEach) as CA,
+	year(orders.shippedDate) as YEAR, month(orders.shippedDate) as MONTH,
+    orders.status as status
+from customers
+join orders on orders.customerNumber = customers.customerNumber
+join orderdetails on orderdetails.orderNumber = orders.orderNumber
+where orders.shippedDate >= DATE_ADD(DATE_ADD(CURRENT_DATE, INTERVAL 1 - DAY(CURRENT_DATE) DAY), INTERVAL -2 MONTH)
+group by country, Month, year) as CA_glob
+where CA_glob.status = 'Shipped' or CA_glob.status = 'Resolved';
+
+
+# Logistics: find the stock of the 5 most sold products
+
+select products.productName, SUM(orderdetails.quantityOrdered) as pdt_sold, products.quantityInStock
+FROM products
+Join orderdetails USING (productCode)
+Join orders USING (orderNumber)
+where orders.status = 'Shipped' or orders.status = 'Resolved'
+GROUP BY products.productName
+Order BY SUM(orderdetails.quantityOrdered) DESC
+LIMIT 5;
+
+
+# Human Resources: Each month, the 2 sellers with highest turnover
+
+CREATE VIEW ca_orders AS
+(select SUM(d.quantityOrdered * d.priceEach) AS CA,
+year(o.orderDate) AS year1, month(o.orderDate) AS month1,
+o.customerNumber as cust_nb, d.orderNumber as ord_nb,
+o.status
+from orderdetails d
+join orders o using (orderNumber)
+where o.status = 'Shipped' or o.status = 'Resolved'
+group by year1, month1, d.orderNumber
+order by o.orderDate desc);
+
+CREATE VIEW ca_orders_customer AS
+(select ca_orders.year1 as year2, ca_orders.month1 as month2,
+ca_orders.cust_nb as cust_nb2, customers.salesRepEmployeeNumber as seller,
+sum(ca_orders.CA) as CA2
+from ca_orders
+join customers on ca_orders.cust_nb = customers.customerNumber
+group by year2, month2, ca_orders.cust_nb
+order by year2 desc, month2 desc, ca_orders.cust_nb);
+
+select *
+from(select ca_orders_customer.year2 as YEAR, ca_orders_customer.month2 as MONTH,
+ca_orders_customer.seller as seller_number, ca_orders_customer.CA2 as CA,
+CONCAT(employees.lastname,' ', employees.firstname) AS employee_name,
+ROW_NUMBER() OVER (PARTITION BY ca_orders_customer.year2, ca_orders_customer.month2 ORDER BY ca_orders_customer.CA2 desc) AS ranking
+from ca_orders_customer
+join employees on ca_orders_customer.seller = employees.employeeNumber
+order by YEAR desc, MONTH desc, CA desc, employee_name) as subQ;
